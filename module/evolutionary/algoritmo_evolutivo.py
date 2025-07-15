@@ -1,75 +1,74 @@
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import cross_val_score
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import cross_val_score
+from multiprocessing import Pool
+import streamlit as st
 
 class AlgoritmoEvolutivo:
-    def __init__(self, data, target, n_poblacion=30, prob_mut=0.05):
+    def __init__(self, data, target_vars, n_poblacion=5, prob_mut=0.03):
         self.data = data
-        self.target = target
-        self.n_poblacion = n_poblacion
+        self.target = target_vars if isinstance(target_vars, list) else [target_vars]
+        self.n_poblacion = max(2, n_poblacion)
         self.prob_mut = prob_mut
-        self.variables = [col for col in data.columns if col != target]
-        self.n_vars = len(self.variables)
-        self.historial_fitness = []
-        self.historial_seleccion = []
-        self.historial_cruce = []
-        self.historial_mutacion = []
+        self.independientes = [col for col in data.columns if col not in self.target]
+        self.n_vars = len(self.independientes)
+        self.historial_fitness = []  # Inicializa el historial de fitness
 
-    def _inicializar_poblacion(self):
-        return np.random.randint(0, 2, (self.n_poblacion, self.n_vars))
-
+    def _generar_individuo(self):
+        return np.random.randint(0, 2, self.n_vars)
+    
     def _evaluar_individuo(self, individuo):
-        vars_seleccionadas = [self.variables[i] for i, val in enumerate(individuo) if val == 1]
-        if not vars_seleccionadas:
-            return 0.0, 0.0  # Penalizar individuos vacíos
-        X = self.data[vars_seleccionadas]
-        y = self.data[self.target]
-        modelo = RandomForestRegressor()
-        mse = -cross_val_score(modelo, X, y, scoring='neg_mean_squared_error').mean()
-        r2 = cross_val_score(modelo, X, y, scoring='r2').mean()
-        return 1 / (1 + mse), r2  # Fitness inverso al MSE
+        cols_selec = [self.independientes[i] for i, val in enumerate(individuo) if val == 1]
+        
+        if not cols_selec:
+            return 0.0
+        
+        X = self.data[cols_selec]
+        y = self.data[self.target].values.ravel()  # Asegúrate de que y sea un array 1D
+        
+        model = RandomForestRegressor(n_estimators=5, max_depth=3, n_jobs=-1)
+        try:
+            mse = -cross_val_score(model, X, y, scoring='neg_mean_squared_error', cv=2).mean()
+            return 1 / (1 + mse)
+        except Exception as e:
+            print(f"Error en la evaluación del individuo: {e}")  # Para depuración
+            return 0.0
 
-    def _seleccion_ruleta(self, poblacion, fitness):
-        prob = fitness / fitness.sum()
-        indices = np.random.choice(range(len(poblacion)), size=len(poblacion), p=prob)
-        return poblacion[indices]
-
-    def _cruce(self, padre1, padre2):
-        punto_cruce = np.random.randint(1, self.n_vars - 1)
-        hijo1 = np.concatenate((padre1[:punto_cruce], padre2[punto_cruce:]))
-        hijo2 = np.concatenate((padre2[:punto_cruce], padre1[punto_cruce:]))
-        return hijo1, hijo2
-
-    def _mutacion(self, individuo):
-        for i in range(self.n_vars):
-            if np.random.rand() < self.prob_mut:
-                individuo[i] = 1 - individuo[i]  # Flip bit
-        return individuo
-
-    def ejecutar(self, n_generaciones):
-        poblacion = self._inicializar_poblacion()
-        for gen in range(n_generaciones):
-            fitness = np.array([self._evaluar_individuo(ind)[0] for ind in poblacion])
-            r2_scores = np.array([self._evaluar_individuo(ind)[1] for ind in poblacion])
-            self.historial_fitness.append(fitness.mean())
-            self.historial_seleccion.append(fitness)
+    def _evaluar_poblacion(self, poblacion):
+        with Pool(2) as pool:
+            return np.array(pool.map(self._evaluar_individuo, poblacion))
+    
+    def _cruzar(self, padre1, padre2):
+        punto = np.random.randint(1, self.n_vars-1)
+        hijo = np.concatenate([padre1[:punto], padre2[punto:]])
+        return hijo
+    
+    def _mutar(self, individuo):
+        return np.where(np.random.random(self.n_vars) < self.prob_mut, 1 - individuo, individuo)
+    
+    def ejecutar(self, n_generaciones=3):
+        poblacion = [self._generar_individuo() for _ in range(self.n_poblacion)]
+        mejor_fitness = -np.inf
+        mejor_individuo = None
+        
+        for _ in range(n_generaciones):
+            fitness = self._evaluar_poblacion(poblacion)
+            self.historial_fitness.append(fitness.max())  # Guarda el mejor fitness de esta generación
             
-            # Selección
-            poblacion_seleccionada = self._seleccion_ruleta(poblacion, fitness)
-            self.historial_cruce.append(poblacion_seleccionada)
-
-            # Cruce y mutación
-            nueva_poblacion = []
-            for i in range(0, self.n_poblacion, 2):
-                padre1, padre2 = poblacion_seleccionada[i], poblacion_seleccionada[i + 1]
-                hijo1, hijo2 = self._cruce(padre1, padre2)
-                nueva_poblacion.append(self._mutacion(hijo1))
-                nueva_poblacion.append(self._mutacion(hijo2))
-            poblacion = np.array(nueva_poblacion)
-
-        # Evaluar la mejor solución
-        mejor_indice = np.argmax(fitness)
-        mejor_fitness = fitness[mejor_indice]
-        mejor_r2 = r2_scores[mejor_indice]
-        return poblacion[mejor_indice], mejor_fitness, mejor_r2, self.historial_fitness
+            idx_mejor = np.argmax(fitness)
+            if fitness[idx_mejor] > mejor_fitness:
+                mejor_fitness = fitness[idx_mejor]
+                mejor_individuo = poblacion[idx_mejor]
+        
+        vars_seleccionadas = []
+        if mejor_individuo is not None:
+            vars_seleccionadas = [self.independientes[i] for i, val in enumerate(mejor_individuo) if val == 1]
+        
+        # Asegúrate de que siempre se devuelva un diccionario válido
+        return {
+            'variables': vars_seleccionadas,
+            'fitness': mejor_fitness if mejor_fitness != -np.inf else 0.0,
+            'total_vars': len(vars_seleccionadas),
+            'historial_fitness': self.historial_fitness  # Devuelve el historial de fitness
+        }

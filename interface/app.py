@@ -304,8 +304,8 @@ with tabs[1]:
                     st.write("-", line)
 
 
-# =================== TAB 3: Análisis ===================
 
+# =================== TAB 3: Análisis ===================
 with tabs[2]:
     st.header("📉 Análisis")
 
@@ -323,137 +323,173 @@ with tabs[2]:
 
         if analisis_modo == "Seleccionar manualmente":
             target_column = st.selectbox("Selecciona la variable objetivo:", df_analysis.columns)
-            st.success(f"✅ Variable objetivo seleccionada: `{target_column}`")
+            st.session_state.target_column = target_column  # Guardar en session_state
+            if st.button("💾 Guardar selección manual"):
+                st.session_state.variables_dependientes = [target_column]
+                st.session_state.metricas_analisis = {target_column: 1.0}  # Valor dummy para el score
+                st.success("✓ Selección manual guardada")
 
         elif analisis_modo == "Detectar automáticamente una cantidad específica":
-            cantidad = st.number_input("¿Cuántas variables dependientes deseas determinar?", min_value=1, max_value=len(df_analysis.columns) - 1, value=1, step=1)
+            cantidad = st.number_input("¿Cuántas variables dependientes deseas determinar?", 
+                                       min_value=1, max_value=len(df_analysis.columns) - 1, value=1, step=1)
 
             if st.button("🔍 Detectar variables dependientes"):
-                top_vars, scores = selector.determinar_variables_dependientes(cantidad=cantidad)
-
-                for i, (var, score) in enumerate(zip(top_vars, scores)):
-                    # Asegurarse de que score sea un número antes de formatear
-                    if isinstance(score, (int, float)):
+                try:
+                    top_vars, scores = selector.determinar_variables_dependientes(cantidad=cantidad)
+                    for i, (var, score) in enumerate(zip(top_vars, scores)):
                         st.markdown(f"**{i+1}. `{var}`** — Score de dependencia: `{score:.4f}`")
-                    else:
-                        st.markdown(f"**{i+1}. `{var}`** — Score de dependencia: `{score}` (no es un número)")
+                    st.session_state.variables_dependientes = top_vars  # Guardar todas las variables detectadas
+                    st.session_state.metricas_analisis = dict(zip(top_vars, scores))  # Guardar scores
+                    st.session_state.target_column = top_vars[0]  # Guardar la primera variable detectada
 
+                    if st.button("💾 Guardar selección automática"):
+                        st.success("✓ Selección automática guardada")
+                except ValueError as e:
+                    st.error(f"❌ Error: {str(e)}")
 
         elif analisis_modo == "Detectar automáticamente todas las dependientes más fuertes":
-            threshold = st.slider("Umbral mínimo de importancia (score):", min_value=0.0, max_value=1.0, value=0.1, step=0.01)
+            threshold = st.slider("Umbral mínimo de importancia (score):", 
+                                  min_value=0.0, max_value=1.0, value=0.1, step=0.01)
 
             if st.button("🔍 Detectar automáticamente"):
-                top_vars, scores = selector.determinar_variables_dependientes(cantidad=None)  
-                metricas = selector.obtener_metricas()  
+                try:
+                    top_vars, scores = selector.determinar_variables_dependientes(cantidad=None)  
+                    metricas = selector.obtener_metricas()  
 
-                seleccionadas = [(k, v) for k, v in metricas.items() if v >= threshold]
+                    seleccionadas = [(k, v) for k, v in metricas.items() if v >= threshold]
 
-                if not seleccionadas:
-                    st.warning("⚠️ No se encontraron variables con un score mayor al umbral seleccionado.")
-                else:
-                    seleccionadas.sort(key=lambda x: x[1], reverse=True)
-                    columnas, scores = zip(*seleccionadas)
+                    if not seleccionadas:
+                        st.warning("⚠️ No se encontraron variables con un score mayor al umbral seleccionado.")
+                    else:
+                        seleccionadas.sort(key=lambda x: x[1], reverse=True)
+                        columnas, scores = zip(*seleccionadas)
 
-                    st.markdown("### 🔬 Variables seleccionadas automáticamente:")
-                    for i, (col, score) in enumerate(seleccionadas):
-                        st.markdown(f"**{i+1}. `{col}`** — Score: `{score:.4f}`")
+                        st.markdown("### 🔬 Variables seleccionadas automáticamente:")
+                        for i, (col, score) in enumerate(seleccionadas):
+                            st.markdown(f"**{i+1}. `{col}`** — Score: `{score:.4f}`")
 
-                    st.subheader("📈 Gráfico de importancia")
-                    import plotly.express as px
-                    fig = px.bar(x=columnas, y=scores, labels={'x': 'Variable', 'y': 'Score'}, title="Importancia según Información Mutua")
-                    st.plotly_chart(fig, use_container_width=True)
+                        st.subheader("📈 Gráfico de importancia")
+                        import plotly.express as px
+                        fig = px.bar(x=columnas, y=scores, labels={'x': 'Variable', 'y': 'Score'}, title="Importancia según Información Mutua")
+                        st.plotly_chart(fig, use_container_width=True)
 
+                        st.session_state.variables_dependientes = columnas  # Guardar todas las variables seleccionadas
+                        st.session_state.metricas_analisis = {col: score for col, score in seleccionadas}  # Guardar scores
+                        st.session_state.target_column = columnas[0]  # Guardar la primera variable seleccionada
 
-                    
-
-
+                        if st.button("💾 Guardar selección por umbral"):
+                            st.success("✓ Selección por umbral guardada")
+                except ValueError as e:
+                    st.error(f"❌ Error: {str(e)}")
 
     else:
         st.warning("🔄 Primero debes realizar el preprocesamiento de datos para usar esta sección.")
 
+
+
 # =================== algoritmo evolutivo ===================
-
-
 with tabs[3]:
     st.header("🧠 Algoritmo Evolutivo")
-    
-    if 'df_preprocessed' in st.session_state and 'target_column' in st.session_state:
-        # ========= CONFIGURACIÓN DE PARÁMETROS =========
-        st.markdown("### ⚙️ Configuración del Algoritmo")
+
+    if 'df_preprocessed' in st.session_state and 'variables_dependientes' in st.session_state:
+        # Mostrar variables objetivo
+        st.subheader("Variables objetivo seleccionadas:")
+        st.table(pd.DataFrame({
+            'Variable': st.session_state.variables_dependientes,
+            'Score': [st.session_state.metricas_analisis[v] 
+                    for v in st.session_state.variables_dependientes]
+        }))
+        
+        # Configuración rápida
+        st.markdown("### ⚙️ Configuración Rápida")
+        
+        # Configuración de parámetros
         col1, col2 = st.columns(2)
         with col1:
-            poblacion_size = st.slider("Tamaño de población", 10, 100, 30)
-            num_generaciones = st.slider("Número de generaciones", 10, 200, 50)
+            n_poblacion = st.number_input("Tamaño población", min_value=2, max_value=30, value=4)
         with col2:
-            prob_mutacion = st.slider("Probabilidad de mutación (%)", 1, 20, 5)
-            prob_cruce = st.slider("Tasa de cruce (%)", 50, 100, 80)
-        
-        # ========= EJECUCIÓN =========
-        if st.button("⚡ Ejecutar Algoritmo Evolutivo"):
-            with st.spinner("Optimizando combinaciones de variables..."):
-                from module.evolutionary.algoritmo_evolutivo import AlgoritmoEvolutivo
+            n_generaciones = st.number_input("Generaciones", min_value=1, max_value=30, value=3)
+
+        # Justo antes de ejecutar el algoritmo evolutivo
+        print("Datos de entrada:")
+        print(st.session_state.df_preprocessed.head())
+        print("Variables dependientes:", st.session_state.variables_dependientes)
+
+        if st.button("⚡ Ejecutar algoritmo evolutivo"):
+            try:
+                # Verificación de datos de entrada
+                if not isinstance(st.session_state.df_preprocessed, pd.DataFrame) or st.session_state.df_preprocessed.empty:
+                    raise ValueError("Los datos preprocesados no son válidos.")
                 
-                # Instanciar y ejecutar
-                evolutivo = AlgoritmoEvolutivo(
-                    data=st.session_state.df_preprocessed,
-                    target=st.session_state.target_column,
-                    n_poblacion=poblacion_size,
-                    prob_mut=prob_mutacion/100
-                )
+                if not st.session_state.variables_dependientes:
+                    raise ValueError("No se han seleccionado variables dependientes.")
                 
-                mejor_indiv, mejor_fitness, mejor_r2, historial = evolutivo.ejecutar(num_generaciones)
+                # Verificar que las variables dependientes existan en el DataFrame
+                for var in st.session_state.variables_dependientes:
+                    if var not in st.session_state.df_preprocessed.columns:
+                        raise ValueError(f"La variable dependiente '{var}' no existe en los datos preprocesados.")
                 
-                # Guardar resultados en sesión
-                st.session_state.mejor_individuo = mejor_indiv
-                st.session_state.historial_evolutivo = historial
-                st.session_state.metricas_finales = {
-                    'MSE': 1/mejor_fitness - 1 if mejor_fitness != 0 else float('inf'),
-                    'R²': mejor_r2
-                }
-                
-                st.success("✅ Optimización completada")
-                
-        # ========= VISUALIZACIÓN DE RESULTADOS =========
-        if 'mejor_individuo' in st.session_state:
-            st.markdown("---")
-            st.markdown("### 📊 Resultados del Proceso Evolutivo")
+                with st.spinner(f"Ejecutando versión rápida con {n_poblacion} individuos y {n_generaciones} generaciones..."):
+                    fast_evo = AlgoritmoEvolutivo(
+                        st.session_state.df_preprocessed,
+                        st.session_state.variables_dependientes,
+                        n_poblacion=n_poblacion,
+                        prob_mut=0.03
+                    )
+                    
+                    resultados = fast_evo.ejecutar(n_generaciones=n_generaciones)
+                    
+                    # Verificación de resultados
+                    if not isinstance(resultados, dict) or 'variables' not in resultados:
+                        raise ValueError("Los resultados no son válidos.")
+                    
+                    st.session_state.resultados_evolutivos = resultados
+                    st.success("¡Optimización rápida completada!")
+                    
+                    st.subheader("Variables seleccionadas:")
+                    st.write(resultados['variables'])
+                    st.metric("Fitness obtenido", value=f"{resultados['fitness']:.4f}")
+                    
+                    st.session_state.optimizacion_completa = True
             
-            # 1. Gráfico de convergencia
-            with st.expander("🔍 Evolución del Fitness", expanded=True):
-                fig_conv = px.line(
-                    x=range(len(st.session_state.historial_evolutivo)),
-                    y=st.session_state.historial_evolutivo,
-                    labels={'x': 'Generación', 'y': 'Fitness Promedio'},
-                    title="Convergencia del Algoritmo"
-                )
-                st.plotly_chart(fig_conv, use_container_width=True)
-            
-            # 2. Mejor combinación encontrada
-            st.markdown("### 🏆 Mejor Combinación de Variables")
-            vars_seleccionadas = [
-                st.session_state.df_preprocessed.columns[i] 
-                for i, val in enumerate(st.session_state.mejor_individuo) 
-                if val == 1
-            ]
-            
-            st.metric("MSE", f"{st.session_state.metricas_finales['MSE']:.4f}")
-            st.metric("R²", f"{st.session_state.metricas_finales['R²']:.4f}")
-            
-            st.markdown("**Variables seleccionadas:**")
-            for i, var in enumerate(vars_seleccionadas, 1):
-                st.markdown(f"{i}. `{var}`")
-            
-            # 3. Visualización de la población final (Heatmap)
-            with st.expander("🧬 Distribución de Variables en Población Final"):
-                # Aquí iría la lógica para visualizar la población
-                st.write("Visualización de cómo se distribuyen las variables en la población final")
-                
+            except Exception as e:
+                st.error(f"Error en la optimización: {str(e)}")
+                st.session_state.optimizacion_completa = False
     else:
-        st.warning("⚠️ Completa primero el preprocesamiento y selección de variable objetivo.")
+        st.warning("Complete primero el preprocesamiento y selección de variables")
 
-
+        
 # =================== resultados ===================
-
 with tabs[4]:
     st.header("📊 Resultados")
-    st.info("🔧 Esta sección se completará más adelante.")
+    
+    # Verifica si se han completado los resultados de la optimización
+    if 'resultados_evolutivos' in st.session_state and st.session_state.optimizacion_completa:
+        resultados = st.session_state.resultados_evolutivos
+        
+        # Mostrar las variables seleccionadas
+        st.subheader("Variables seleccionadas:")
+        st.write(resultados['variables'])
+        
+        # Mostrar el fitness obtenido
+        st.metric("Fitness obtenido", value=f"{resultados['fitness']:.4f}")
+        
+        # Mostrar el total de variables seleccionadas
+        st.write(f"Total de variables seleccionadas: {resultados['total_vars']}")
+        
+        # Gráfico de la evolución del fitness
+        if 'historial_fitness' in resultados:
+            import matplotlib.pyplot as plt
+            
+            plt.figure(figsize=(10, 5))
+            plt.plot(resultados['historial_fitness'], marker='o')
+            plt.title("Evolución del Fitness a lo largo de las Generaciones")
+            plt.xlabel("Generación")
+            plt.ylabel("Fitness")
+            plt.grid()
+            st.pyplot(plt)
+        else:
+            st.warning("No se dispone de datos de evolución del fitness.")
+    
+    else:
+        st.warning("No se han completado los resultados de la optimización. Asegúrate de ejecutar el algoritmo evolutivo primero.")

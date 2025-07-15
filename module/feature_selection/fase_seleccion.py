@@ -1,25 +1,20 @@
 import pandas as pd
-import numpy as np
 from sklearn.feature_selection import mutual_info_regression, mutual_info_classif
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import cross_val_score
+from sklearn.linear_model import LinearRegression
 
 class FaseSeleccion:
     def __init__(self, df: pd.DataFrame):
         self.df = df.copy()
         self.df_preparado = None
-        self.metricas = {}  # Inicializa metricas como un diccionario vacío
+        self.metricas = {}
 
     def _preparar_datos(self):
         """Prepara los datos normalizando y codificando variables"""
         df = self.df.copy()
         
-        # 1. Codificación de categóricas
-        categoricas = df.select_dtypes(include=['object', 'category']).columns
-        for col in categoricas:
-            df[col] = LabelEncoder().fit_transform(df[col].astype(str))
-        
-        # 2. Normalización numérica (evitando columna objetivo)
+        # Normalización numérica (evitando columna objetivo)
         if hasattr(self, 'target_column'):
             num_cols = [col for col in df.columns 
                         if col != self.target_column and 
@@ -42,9 +37,23 @@ class FaseSeleccion:
         for col in df.columns:
             X = df.drop(columns=[col])
             y = df[col]
-            
+
+            # Verificar que y sea numérica y no contenga nulos
+            if not pd.api.types.is_numeric_dtype(y):
+                raise ValueError(f"La variable dependiente '{col}' no es numérica.")
+            if y.isnull().any():
+                raise ValueError(f"La variable dependiente '{col}' contiene valores nulos.")
+
             # Determinar si es un problema de clasificación o regresión
-            es_clasificacion = (y.nunique() <= 10) and (y.dtype in ['int64', 'object'])  # Heurística para clasificación
+            if y.nunique() <= 10 and pd.api.types.is_integer_dtype(y):
+                # Si hay 10 o menos clases únicas y es de tipo entero, es clasificación
+                es_clasificacion = True
+            elif y.nunique() <= 10 and pd.api.types.is_object_dtype(y):
+                # Si hay 10 o menos clases únicas y es de tipo objeto, es clasificación
+                es_clasificacion = True
+            else:
+                # En caso contrario, es regresión
+                es_clasificacion = False
             
             if es_clasificacion:
                 score = mutual_info_classif(X, y, discrete_features='auto')
@@ -53,7 +62,7 @@ class FaseSeleccion:
             
             score_total = score.mean()  # Promedio de scores
             scores[col] = score_total
-            self.metricas[col] = score_total  # Almacena el score en metricas
+            self.metricas[col] = score_total  # Guarda el score en el atributo metricas
 
         # Seleccionar las N variables más importantes
         if cantidad is None:
@@ -64,7 +73,5 @@ class FaseSeleccion:
         return list(columnas), list(valores)
 
     def obtener_metricas(self):
-        """Devuelve todas las métricas calculadas"""
-        if not self.metricas:
-            raise ValueError("Primero debes ejecutar determinar_variables_dependientes()")
+        """Devuelve el diccionario con todas las métricas calculadas"""
         return self.metricas
