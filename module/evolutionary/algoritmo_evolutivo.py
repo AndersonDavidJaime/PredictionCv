@@ -1,90 +1,139 @@
 import numpy as np
 import pandas as pd
+from deap import base, creator, tools
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import cross_val_score
-from multiprocessing import Pool
-import streamlit as st
 
 class AlgoritmoEvolutivo:
-    def __init__(self, data, target_vars, n_poblacion=5, prob_mut=0.03, tournament_size=3):
+    def __init__(self, data, target_vars, n_poblacion=5, prob_mut=0.03, prob_cruce=0.5, n_generaciones=10, lambda_penal=0.01, min_vars=1):
         self.data = data
         self.target = target_vars if isinstance(target_vars, list) else [target_vars]
         self.n_poblacion = max(2, n_poblacion)
         self.prob_mut = prob_mut
-        self.tournament_size = tournament_size  # Tamaño del torneo
+        self.prob_cruce = prob_cruce
+        self.n_generaciones = n_generaciones
+        self.lambda_penal = lambda_penal  
         self.independientes = [col for col in data.columns if col not in self.target]
+        self.min_vars = min_vars
         self.n_vars = len(self.independientes)
-        self.historial_fitness = []  # Inicializa el historial de fitness
 
-    def _generar_individuo(self):
-        return np.random.randint(0, 2, self.n_vars)
-    
+        # Crear tipos de fitness y individuo para MINIMIZACIÓN
+        if not hasattr(creator, "FitnessMin"):
+            creator.create("FitnessMin", base.Fitness, weights=(-1.0,))  # Minimizacion
+        if not hasattr(creator, "Individual"):
+            creator.create("Individual", list, fitness=creator.FitnessMin)
+
+        self.toolbox = base.Toolbox()
+        self.toolbox.register("attr_bool", np.random.randint, 0, 2)
+        self.toolbox.register("individual", self._init_individual, creator.Individual)
+        self.toolbox.register("population", tools.initRepeat, list, self.toolbox.individual)
+        self.toolbox.register("evaluate", self._evaluar_individuo)
+        self.toolbox.register("mate", tools.cxTwoPoint)
+        self.toolbox.register("mutate", tools.mutFlipBit, indpb=self.prob_mut)
+        self.toolbox.register("select", tools.selTournament, tournsize=3)
+
+        self.historial_fitness = []  # Guardar la evolución del fitness
+
+    def _init_individual(self, icls):
+        #Genera un individuo que respete el mínimo de variables requeridas
+        ind = [0] * self.n_vars
+        seleccionadas = np.random.choice(range(self.n_vars), 
+                                         size=np.random.randint(self.min_vars, self.n_vars+1), 
+                                         replace=False)
+        for idx in seleccionadas:
+            ind[idx] = 1
+        return icls(ind)
+
     def _evaluar_individuo(self, individuo):
         cols_selec = [self.independientes[i] for i, val in enumerate(individuo) if val == 1]
-        
-        if not cols_selec:
-            return 0.0
-        
+
+        # Penalización si no cumple mínimo
+        if len(cols_selec) < self.min_vars:
+            return float('inf'),  
+    
         X = self.data[cols_selec]
-        y = self.data[self.target].values.ravel()  
-        
-        model = RandomForestRegressor(n_estimators=5, max_depth=3, n_jobs=-1)
+        y = self.data[self.target].values.ravel()
+
+        model = RandomForestRegressor(n_estimators=20, max_depth=5, n_jobs=-1, random_state=42)
         try:
-            mse = -cross_val_score(model, X, y, scoring='neg_mean_squared_error', cv=2).mean()
-            return 1 / (1 + mse)
+            # Calcular el MSE con validación cruzada
+            mse = -cross_val_score(model, X, y, scoring='neg_mean_squared_error', cv=3).mean()
+
+            # Penalización por número de variables
+            penalizacion = self.lambda_penal * len(cols_selec)
+
+            # Fitness = MSE + penalización que busca MINIMIZAR
+            fitness = mse + penalizacion
+            return fitness,
+
         except Exception as e:
-            print(f"Error en la evaluación del individuo: {e}")  # Para depuración
-            return 0.0
+            print(f"Error en la evaluación del individuo: {e}")
+            return float('inf'),
 
-    def _evaluar_poblacion(self, poblacion):
-        with Pool(2) as pool:
-            return np.array(pool.map(self._evaluar_individuo, poblacion))
-    
-    def _cruzar(self, padre1, padre2):
-        punto = np.random.randint(1, self.n_vars-1)
-        hijo = np.concatenate([padre1[:punto], padre2[punto:]])
-        return hijo
-    
-    def _mutar(self, individuo):
-        return np.where(np.random.random(self.n_vars) < self.prob_mut, 1 - individuo, individuo)
+    def ejecutar(self, tol=1e-8, max_mutaciones=50):
+        # Crear población inicial
+        poblacion = self.toolbox.population(n=self.n_poblacion)
 
-    def _seleccion_torneo(self, poblacion, fitness):
-        indices = np.random.choice(len(poblacion), self.tournament_size, replace=False)
-        mejor_idx = indices[np.argmax(fitness[indices])]
-        return poblacion[mejor_idx]
+        # Evaluar la población inicial
+        fitnesses = list(map(self.toolbox.evaluate, poblacion))
+        for ind, fit in zip(poblacion, fitnesses):
+            ind.fitness.values = fit
 
-    def ejecutar(self, n_generaciones=3):
-        poblacion = [self._generar_individuo() for _ in range(self.n_poblacion)]
-        mejor_fitness = -np.inf
-        mejor_individuo = None
-        
-        for _ in range(n_generaciones):
-            fitness = self._evaluar_poblacion(poblacion)
-            self.historial_fitness.append(fitness.max())  # Guarda el mejor fitness de esta generación
-            
-            # Selección de los mejores individuos usando torneo
-            nueva_poblacion = []
-            for _ in range(self.n_poblacion):
-                padre1 = self._seleccion_torneo(poblacion, fitness)
-                padre2 = self._seleccion_torneo(poblacion, fitness)
-                hijo = self._cruzar(padre1, padre2)
-                hijo = self._mutar(hijo)
-                nueva_poblacion.append(hijo)
-            
-            poblacion = nueva_poblacion
-            
-            idx_mejor = np.argmax(fitness)
-            if fitness[idx_mejor] > mejor_fitness:
-                mejor_fitness = fitness[idx_mejor]
-                mejor_individuo = poblacion[idx_mejor]
-        
-        vars_seleccionadas = []
-        if mejor_individuo is not None:
-            vars_seleccionadas = [self.independientes[i] for i, val in enumerate(mejor_individuo) if val == 1]
-        
+        mejor_hasta_ahora = min(fitnesses)[0]
+
+        # Evolución
+        for gen in range(self.n_generaciones):
+            offspring = self.toolbox.select(poblacion, len(poblacion))
+            offspring = list(map(self.toolbox.clone, offspring))
+
+            # Cruce
+            for child1, child2 in zip(offspring[::2], offspring[1::2]):
+                if np.random.rand() < self.prob_cruce:
+                    self.toolbox.mate(child1, child2)
+                    del child1.fitness.values
+                    del child2.fitness.values
+
+            # Mutación
+            for mutant in offspring:
+                if np.random.rand() < self.prob_mut:
+                    self.toolbox.mutate(mutant)
+                    del mutant.fitness.values
+
+            # Evaluar individuos inválidos
+            invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+            for ind in invalid_ind:
+                ind.fitness.values = self.toolbox.evaluate(ind)
+
+            # Garantizar que el fitness sea decreciente
+            fits = [ind.fitness.values[0] for ind in offspring]
+            mejor_idx = np.argmin(fits)
+            mejor_gen = fits[mejor_idx]
+
+            intentos = 0
+            while mejor_gen >= mejor_hasta_ahora - tol and intentos < max_mutaciones:
+                # Aplicar mutación adicional al mejor individuo
+                self.toolbox.mutate(offspring[mejor_idx])
+                offspring[mejor_idx].fitness.values = self.toolbox.evaluate(offspring[mejor_idx])
+                mejor_gen = offspring[mejor_idx].fitness.values[0]
+                intentos += 1
+
+            # Actualizar mejor fitness
+            if mejor_gen < mejor_hasta_ahora - tol:
+                mejor_hasta_ahora = mejor_gen
+
+            self.historial_fitness.append(mejor_hasta_ahora)
+            poblacion[:] = offspring
+
+        # Mejor individuo final
+        mejor_idx = np.argmin([ind.fitness.values[0] for ind in poblacion])
+        mejor_individuo = poblacion[mejor_idx]
+        vars_seleccionadas = [self.independientes[i] for i, val in enumerate(mejor_individuo) if val == 1]
+        mejor_fitness = mejor_individuo.fitness.values[0]
+
         return {
             'variables': vars_seleccionadas,
-            'fitness': mejor_fitness if mejor_fitness != -np.inf else 0.0,
+            'fitness': mejor_fitness,
             'total_vars': len(vars_seleccionadas),
-            'historial_fitness': self.historial_fitness  # Devuelve el historial de fitness
+            'historial_fitness': self.historial_fitness
         }
+
