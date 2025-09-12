@@ -8,4 +8,5 @@ openpyxl
 tqdm
 black
 deap
+category_encoders
 
