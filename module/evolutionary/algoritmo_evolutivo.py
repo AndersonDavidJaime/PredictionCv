@@ -1,25 +1,82 @@
 import numpy as np
 import pandas as pd
 from deap import base, creator, tools
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import cross_val_score
+from sklearn.ensemble import (
+    RandomForestRegressor, GradientBoostingRegressor,
+    RandomForestClassifier, GradientBoostingClassifier
+)
+from sklearn.linear_model import LinearRegression, Ridge, LogisticRegression
+from sklearn.svm import SVR, SVC
+from sklearn.neighbors import KNeighborsRegressor, KNeighborsClassifier
+from sklearn.model_selection import cross_val_score, KFold, StratifiedKFold
+import streamlit as st
+from sklearn.metrics import log_loss, make_scorer, f1_score, precision_score, recall_score, brier_score_loss
+
 
 class AlgoritmoEvolutivo:
-    def __init__(self, data, target_vars, n_poblacion=5, prob_mut=0.03, prob_cruce=0.5, n_generaciones=10, lambda_penal=0.01, min_vars=1):
-        self.data = data
+    def __init__(self, data, target_vars, modelo_seleccionado=None,
+                 n_poblacion=5, prob_mut=0.03, prob_cruce=0.5,
+                 n_generaciones=10, lambda_penal=0.03, min_vars=1, cv=3,
+                 enforce_strict=False, max_attempts_strict=30):
+        self.data = data.copy()
         self.target = target_vars if isinstance(target_vars, list) else [target_vars]
+
+        if len(self.target) != 1:
+            raise ValueError("AlgoritmoEvolutivo soporta una única variable dependiente por ejecución.")
+        self.target = self.target[0]
+
         self.n_poblacion = max(2, n_poblacion)
         self.prob_mut = prob_mut
         self.prob_cruce = prob_cruce
         self.n_generaciones = n_generaciones
-        self.lambda_penal = lambda_penal  
-        self.independientes = [col for col in data.columns if col not in self.target]
+        self.lambda_penal = lambda_penal
         self.min_vars = min_vars
+        self.cv = cv
+
+        self.independientes = [c for c in self.data.columns if c != self.target]
         self.n_vars = len(self.independientes)
 
-        # Crear tipos de fitness y individuo para MINIMIZACIÓN
+        self.enforce_strict = bool(enforce_strict)
+        self.max_attempts_strict = int(max_attempts_strict)
+
+        self.task_type = self._detect_task_type()
+
+        # Modelos para regresión
+        self.modelos_reg = {
+            "RandomForest": RandomForestRegressor(
+                n_estimators=50, max_depth=5, n_jobs=-1, random_state=42
+            ),
+            "GradientBoosting": GradientBoostingRegressor(random_state=42),
+            "LinearRegression": LinearRegression(),
+            "Ridge": Ridge(),
+            "SVR": SVR(),
+            "KNN": KNeighborsRegressor()
+        }
+
+        # Modelos para clasificación
+        self.modelos_clf = {
+            "RandomForest": RandomForestClassifier(n_estimators=50, n_jobs=-1, random_state=42),
+            "GradientBoosting": GradientBoostingClassifier(random_state=42),
+            "LogisticRegression": LogisticRegression(max_iter=1000, random_state=42),
+            "KNN": KNeighborsClassifier()
+        }
+
+        # Conjunto de modelos según tipo
+        self.modelos = self.modelos_clf if self.task_type == "classification" else self.modelos_reg
+
+        # ✅ Selección del modelo
+        if modelo_seleccionado and modelo_seleccionado in self.modelos:
+            self.modelo_activo = {modelo_seleccionado: self.modelos[modelo_seleccionado]}
+        else:
+            nombre_default = list(self.modelos.keys())[0]
+            self.modelo_activo = {nombre_default: self.modelos[nombre_default]}
+
+        # Solo historial del modelo activo
+        self.historial_por_modelo = {name: [] for name in self.modelo_activo.keys()}
+
+        # DEAP setup
         if not hasattr(creator, "FitnessMin"):
-            creator.create("FitnessMin", base.Fitness, weights=(-1.0,))  # Minimizacion
+            creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
         if not hasattr(creator, "Individual"):
             creator.create("Individual", list, fitness=creator.FitnessMin)
 
@@ -32,108 +89,154 @@ class AlgoritmoEvolutivo:
         self.toolbox.register("mutate", tools.mutFlipBit, indpb=self.prob_mut)
         self.toolbox.register("select", tools.selTournament, tournsize=3)
 
-        self.historial_fitness = []  # Guardar la evolución del fitness
+        self.eval_cache = {}
+
+    def _detect_task_type(self):
+        try:
+            preprocess_log = st.session_state.get("preprocessing_log") \
+                or st.session_state.get("preprocessingLog")
+            if isinstance(preprocess_log, dict):
+                cat_cols = preprocess_log.get("deteccion", {}).get("columnas_categoricas", [])
+                if self.target in cat_cols:
+                    return "classification"
+        except Exception:
+            pass
+
+        series = self.data[self.target]
+
+        # Si es object o category => clasificación
+        if pd.api.types.is_object_dtype(series) or pd.api.types.is_categorical_dtype(series):
+            return "classification"
+
+        # Si es entero con MUY pocos valores únicos (ejemplo: binario o hasta 4 clases)
+        if pd.api.types.is_integer_dtype(series) and series.nunique() <= 10:
+            return "classification"
+
+        # Si es float o entero con suficientes valores => regresión
+        return "regression"
+
 
     def _init_individual(self, icls):
-        #Genera un individuo que respete el mínimo de variables requeridas
         ind = [0] * self.n_vars
-        seleccionadas = np.random.choice(range(self.n_vars), 
-                                         size=np.random.randint(self.min_vars, self.n_vars+1), 
-                                         replace=False)
+        k = np.random.randint(self.min_vars, self.n_vars + 1)
+        seleccionadas = np.random.choice(range(self.n_vars), size=k, replace=False)
         for idx in seleccionadas:
             ind[idx] = 1
         return icls(ind)
 
-    def _evaluar_individuo(self, individuo):
-        cols_selec = [self.independientes[i] for i, val in enumerate(individuo) if val == 1]
 
-        # Penalización si no cumple mínimo
-        if len(cols_selec) < self.min_vars:
-            return float('inf'),  
-    
-        X = self.data[cols_selec]
+    def _evaluar_individuo(self, individuo, mejor_hasta_ahora=float("inf")):
+        cols_seleccionadas = [self.independientes[i] for i, v in enumerate(individuo) if v == 1]
+
+        if len(cols_seleccionadas) < self.min_vars:
+            return (10.0 + self.lambda_penal * (self.min_vars - len(cols_seleccionadas)),)
+
+        key = tuple(sorted(cols_seleccionadas))
+        if key in self.eval_cache:
+            best_fitness, resultados_modelos, best_model = self.eval_cache[key]
+            individuo.resultados_modelos = resultados_modelos
+            individuo.mejor_modelo = best_model
+            return best_fitness,
+
+        X = self.data[cols_seleccionadas]
         y = self.data[self.target].values.ravel()
 
-        model = RandomForestRegressor(n_estimators=20, max_depth=5, n_jobs=-1, random_state=42)
-        try:
-            # Calcular el MSE con validación cruzada
-            mse = -cross_val_score(model, X, y, scoring='neg_mean_squared_error', cv=3).mean()
+        resultados_modelos = {}
+        mejor_modelo = None
+        mejor_fitness = float("inf")
 
-            # Penalización por número de variables
-            penalizacion = self.lambda_penal * len(cols_selec)
+        #  Solo se evalúa el modelo activo
+        for nombre, modelo in self.modelo_activo.items():
+            try:
+                #para casos de regresion 
+                if self.task_type == "regression":
+                    cv_strategy = KFold(n_splits=min(self.cv, len(y)), shuffle=True, random_state=42)
+                    MSE = cross_val_score(modelo, X, y, scoring="neg_mean_squared_error", cv=cv_strategy, n_jobs=-1)
+                    fitness = -MSE.mean() + self.lambda_penal * len(cols_seleccionadas)
+                
+                #para casos de clasificacion
+                else:
+                    cv_strategy = StratifiedKFold(n_splits=min(self.cv, len(y)), shuffle=True, random_state=42)
+                    score = cross_val_score(modelo, X, y, scoring="neg_log_loss", cv=cv_strategy)
+                    fitness = -score.mean() + self.lambda_penal * len(cols_seleccionadas)
+                    
+            except Exception:
+                fitness = 10.0 + self.lambda_penal * len(cols_seleccionadas)
 
-            # Fitness = MSE + penalización que busca MINIMIZAR
-            fitness = mse + penalizacion
-            return fitness,
+            resultados_modelos[nombre] = fitness
+            if fitness < mejor_fitness:
+                mejor_fitness = fitness
+                mejor_modelo = nombre
 
-        except Exception as e:
-            print(f"Error en la evaluación del individuo: {e}")
-            return float('inf'),
+        self.eval_cache[key] = (mejor_fitness, resultados_modelos, mejor_modelo)
+        individuo.resultados_modelos = resultados_modelos
+        individuo.mejor_modelo = mejor_modelo
+        return mejor_fitness,
 
-    def ejecutar(self, tol=1e-8, max_mutaciones=50):
-        # Crear población inicial
+
+    def ejecutar(self):
         poblacion = self.toolbox.population(n=self.n_poblacion)
-
-        # Evaluar la población inicial
-        fitnesses = list(map(self.toolbox.evaluate, poblacion))
+        fitnesses = list(map(lambda ind: self.toolbox.evaluate(ind), poblacion))
         for ind, fit in zip(poblacion, fitnesses):
             ind.fitness.values = fit
 
-        mejor_hasta_ahora = min(fitnesses)[0]
+        mejor_hasta_ahora = min(ind.fitness.values[0] for ind in poblacion)
 
-        # Evolución
+        # Historial inicial
+        for nombre in self.modelo_activo.keys():
+            vals = [ind.resultados_modelos.get(nombre, float("inf")) for ind in poblacion]
+            self.historial_por_modelo[nombre].append(min(vals) if vals else float("inf"))
+
         for gen in range(self.n_generaciones):
-            offspring = self.toolbox.select(poblacion, len(poblacion))
+            mejor_idx = np.argmin([ind.fitness.values[0] for ind in poblacion])
+            mejor_ind = self.toolbox.clone(poblacion[mejor_idx])
+
+            offspring = self.toolbox.select(poblacion, len(poblacion) - 1)
             offspring = list(map(self.toolbox.clone, offspring))
+            offspring.append(mejor_ind)
 
-            # Cruce
-            for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            for c1, c2 in zip(offspring[::2], offspring[1::2]):
                 if np.random.rand() < self.prob_cruce:
-                    self.toolbox.mate(child1, child2)
-                    del child1.fitness.values
-                    del child2.fitness.values
+                    self.toolbox.mate(c1, c2)
+                    del c1.fitness.values
+                    del c2.fitness.values
 
-            # Mutación
-            for mutant in offspring:
+            for m in offspring:
                 if np.random.rand() < self.prob_mut:
-                    self.toolbox.mutate(mutant)
-                    del mutant.fitness.values
+                    self.toolbox.mutate(m)
+                    del m.fitness.values
 
-            # Evaluar individuos inválidos
-            invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
-            for ind in invalid_ind:
-                ind.fitness.values = self.toolbox.evaluate(ind)
+            for ind in offspring:
+                if not ind.fitness.valid:
+                    ind.fitness.values = self.toolbox.evaluate(ind)
 
-            # Garantizar que el fitness sea decreciente
-            fits = [ind.fitness.values[0] for ind in offspring]
-            mejor_idx = np.argmin(fits)
-            mejor_gen = fits[mejor_idx]
+                attempts = 0
+                while ind.fitness.values[0] >= mejor_hasta_ahora and attempts < 5:
+                    self.toolbox.mutate(ind)
+                    ind.fitness.values = self.toolbox.evaluate(ind)
+                    attempts += 1
 
-            intentos = 0
-            while mejor_gen >= mejor_hasta_ahora - tol and intentos < max_mutaciones:
-                # Aplicar mutación adicional al mejor individuo
-                self.toolbox.mutate(offspring[mejor_idx])
-                offspring[mejor_idx].fitness.values = self.toolbox.evaluate(offspring[mejor_idx])
-                mejor_gen = offspring[mejor_idx].fitness.values[0]
-                intentos += 1
+            poblacion = offspring
+            mejor_hasta_ahora = min(ind.fitness.values[0] for ind in poblacion)
 
-            # Actualizar mejor fitness
-            if mejor_gen < mejor_hasta_ahora - tol:
-                mejor_hasta_ahora = mejor_gen
+            for nombre in self.modelo_activo.keys():
+                vals = [ind.resultados_modelos.get(nombre, float("inf")) for ind in poblacion]
+                self.historial_por_modelo[nombre].append(min(vals) if vals else float("inf"))
 
-            self.historial_fitness.append(mejor_hasta_ahora)
-            poblacion[:] = offspring
-
-        # Mejor individuo final
         mejor_idx = np.argmin([ind.fitness.values[0] for ind in poblacion])
         mejor_individuo = poblacion[mejor_idx]
-        vars_seleccionadas = [self.independientes[i] for i, val in enumerate(mejor_individuo) if val == 1]
+
+        vars_seleccionadas = [
+            self.independientes[i] for i, val in enumerate(mejor_individuo) if val == 1
+        ]
         mejor_fitness = mejor_individuo.fitness.values[0]
 
         return {
-            'variables': vars_seleccionadas,
-            'fitness': mejor_fitness,
-            'total_vars': len(vars_seleccionadas),
-            'historial_fitness': self.historial_fitness
+            "variables": vars_seleccionadas,
+            "fitness": mejor_fitness,
+            "modelo": mejor_individuo.mejor_modelo,
+            "resultados_modelos": mejor_individuo.resultados_modelos,
+            "total_vars": len(vars_seleccionadas),
+            "historial_por_modelo": self.historial_por_modelo,
+            "task_type": self.task_type
         }
-

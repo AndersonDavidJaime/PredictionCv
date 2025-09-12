@@ -5,6 +5,7 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.feature_selection import VarianceThreshold
 from scipy.stats import f_oneway
 
+
 class Preprocessing:
     @staticmethod
     def detectar_columnas_categoricas(df):
@@ -13,44 +14,17 @@ class Preprocessing:
     @staticmethod
     def codificar_columnas_categoricas(df, columnas_cat, log):
         df_encoded = df.copy()
-        encoder = TargetEncoder()
         log["codificacion"] = []
 
         for col in columnas_cat:
-            otras_columnas = df_encoded.drop(columns=[col])
-            numericas = otras_columnas.select_dtypes(include=[np.number])
-
-            if not numericas.empty:
-                f_scores = []
-                for num_col in numericas.columns:
-                    grupos = [df_encoded[df_encoded[col] == val][num_col].dropna()
-                              for val in df_encoded[col].unique()]
-                    if len(grupos) > 1:
-                        try:
-                            _, p_valor = f_oneway(*grupos)
-                            f_scores.append(p_valor)
-                        except:
-                            continue
-
-                if f_scores and min(f_scores) < 0.05:
-                    df_encoded[col] = encoder.fit_transform(df_encoded[col], df_encoded[numericas.columns[0]])
-                    log["codificacion"].append(
-                        f"'{col}' codificada con TargetEncoder por relación estadística con variables numéricas."
-                    )
-                else:
-                    le = LabelEncoder()
-                    df_encoded[col] = le.fit_transform(df_encoded[col].astype(str))
-                    log["codificacion"].append(
-                        f"'{col}' codificada con LabelEncoder por falta de correlación significativa."
-                    )
-            else:
-                le = LabelEncoder()
-                df_encoded[col] = le.fit_transform(df_encoded[col].astype(str))
-                log["codificacion"].append(
-                    f"'{col}' codificada con LabelEncoder por ausencia de variables numéricas."
-                )
+            le = LabelEncoder()
+            df_encoded[col] = le.fit_transform(df_encoded[col].astype(str))
+            log["codificacion"].append(
+                f"'{col}' codificada con LabelEncoder a valores discretos."
+            )
 
         return df_encoded, log
+
 
     @classmethod
     def ejecutar_preprocesamiento_completo(cls, df_original):

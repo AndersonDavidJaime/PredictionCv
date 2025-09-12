@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 from sklearn.feature_selection import mutual_info_regression, mutual_info_classif
 from sklearn.preprocessing import StandardScaler
+import streamlit as st
+
 
 class FaseSeleccionRobusta:
     def __init__(self, df: pd.DataFrame):

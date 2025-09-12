@@ -10,6 +10,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from module.preprocessing.preprocessing import Preprocessing
 from module.feature_selection.fase_seleccion import FaseSeleccionRobusta
 from module.evolutionary.algoritmo_evolutivo import AlgoritmoEvolutivo
+import streamlit as st
 
 
 # Configuración de página
@@ -191,12 +192,12 @@ with tabs[2]:
             "Detectar automáticamente todas las dependientes más fuertes"
         ))
 
-        # Inicializamos variables de sesión
         if "variables_detectadas" not in st.session_state:
             st.session_state.variables_detectadas = []
         if "variable_seleccionada" not in st.session_state:
             st.session_state.variable_seleccionada = None
 
+        # --- SELECCIÓN MANUAL ---
         if analisis_modo == "Seleccionar manualmente":
             target_column = st.selectbox("Selecciona la variable objetivo:", df_analysis.columns)
             if st.button("💾 Guardar selección manual"):
@@ -206,9 +207,23 @@ with tabs[2]:
                     metricas = selector.obtener_metricas()
                     score = metricas.get(target_column, 1.0)
 
+                    # Guardar selección
                     st.session_state.variables_dependientes = [target_column]
                     st.session_state.metricas_analisis = {target_column: score}
                     st.session_state.target_column = target_column
+
+                    # 🚨 DETECTAR AUTOMÁTICAMENTE EL TIPO DE PROBLEMA USANDO EL LOG ORIGINAL
+                    if 'preprocessing_log' in st.session_state:
+                        categorical_cols = st.session_state.preprocessing_log.get('deteccion', {}).get('columnas_categoricas', [])
+                    else:
+                        categorical_cols = []
+
+                    if target_column in categorical_cols:
+                        st.session_state.tipo_problema = "clasificacion"
+                        st.info("🔎 Se detectó un **problema de Clasificación** — Se usará **logarithmic loss** como función objetivo.")
+                    else:
+                        st.session_state.tipo_problema = "Regresion"
+                        st.info("🔎 Se detectó un **problema de Regresión** — Se usará **MSE** como función objetivo.")
 
                     st.success(f"✓ Selección manual guardada: `{target_column}` — Score: {score:.4f}")
 
@@ -223,11 +238,12 @@ with tabs[2]:
                     )
                     fig.update_traces(marker_color=['red' if col == target_column else 'blue' for col in columnas])
                     st.plotly_chart(fig, use_container_width=True)
+
                 except ValueError as e:
                     st.error(f"❌ Error: {str(e)}")
 
+        # --- DETECCIÓN AUTOMÁTICA ---
         else:
-            # Detectar automáticamente
             cantidad = None
             threshold = None
             if analisis_modo == "Detectar automáticamente una cantidad específica":
@@ -257,10 +273,24 @@ with tabs[2]:
                         # Guardar lista de variables detectadas en session_state
                         st.session_state.variables_detectadas = seleccionadas
 
+                        # 🚨 DETECTAR TIPO DE PROBLEMA PARA LA PRIMERA VARIABLE DETECTADA
+                        if 'preprocessing_log' in st.session_state:
+                            categorical_cols = st.session_state.preprocessing_log.get('deteccion', {}).get('columnas_categoricas', [])
+                        else:
+                            categorical_cols = []
+
+                        primera_var = seleccionadas[0][0]
+                        if primera_var in categorical_cols:
+                            st.session_state.tipo_problema = "clasificacion"
+                            st.info("🔎 Se detectó un **problema de Clasificación** — Se usará **Accuracy** como función objetivo.")
+                        else:
+                            st.session_state.tipo_problema = "estimacion"
+                            st.info("🔎 Se detectó un **problema de Regresión** — Se usará **MSE** como función objetivo.")
+
                 except ValueError as e:
                     st.error(f"❌ Error: {str(e)}")
 
-            # Mostrar tabla de variables detectadas si existe
+            # Mostrar tabla de variables detectadas
             if st.session_state.variables_detectadas:
                 st.markdown("### 🔬 Variables detectadas:")
                 for idx, (var, score) in enumerate(st.session_state.variables_detectadas):
@@ -300,7 +330,6 @@ with tabs[2]:
     else:
         st.warning("🔄 Primero debes realizar el preprocesamiento de datos para usar esta sección.")
 
-
 # =================== algoritmo evolutivo ===================
 with tabs[3]:
     st.header("🧠 Algoritmo Evolutivo")
@@ -312,6 +341,15 @@ with tabs[3]:
             'Score': [st.session_state.metricas_analisis[v] 
                       for v in st.session_state.variables_dependientes]
         }))
+
+        # 🔽 Selección del modelo
+        if 'tipo_problema' in st.session_state and st.session_state.tipo_problema.lower().startswith("clas"):
+            modelos_disponibles = ["RandomForest", "GradientBoosting", "LogisticRegression", "KNN"]
+        else:
+            modelos_disponibles = ["RandomForest", "GradientBoosting", "LinearRegression", "Ridge", "SVR", "KNN"]
+
+        modelo_seleccionado = st.selectbox("Selecciona el modelo a usar:", modelos_disponibles)
+
 
         st.markdown("### ⚙️ Configuración Rápida")
         col1, col2, col3, col4, col5 = st.columns(5)
@@ -339,6 +377,10 @@ with tabs[3]:
                     if var not in st.session_state.df_preprocessed.columns:
                         raise ValueError(f"La variable dependiente '{var}' no existe en los datos preprocesados.")
                 
+                categorical_cols = []
+                if 'preprocessing_log' in st.session_state:
+                    categorical_cols = st.session_state.preprocessing_log.get('deteccion', {}).get('columnas_categoricas', [])
+
                 with st.spinner(f"Ejecutando versión con {n_poblacion} individuos y {n_generaciones} generaciones..."):
                     start_time = time.time()
                     fast_evo = AlgoritmoEvolutivo(
@@ -348,7 +390,8 @@ with tabs[3]:
                         n_generaciones=n_generaciones,
                         prob_mut=prob_mut,
                         prob_cruce=prob_cruce,
-                        min_vars=min_vars
+                        min_vars=min_vars,
+                        modelo_seleccionado=modelo_seleccionado
                     )
                     resultados = fast_evo.ejecutar()
                     end_time = time.time()
@@ -373,7 +416,7 @@ with tabs[3]:
 
                     st.subheader("Variables seleccionadas:")
                     st.write(resultados['variables'])
-                    st.metric("Fitness obtenido (MSE)", value=f"{resultados['fitness']:.20f}")
+                    st.metric("Fitness obtenido", value=f"{resultados['fitness']:.20f}")
                     st.write(f"Tiempo de ejecución: {execution_time:.4f} segundos")
                     st.write(f"Total de variables seleccionadas: {resultados['total_vars']}")
 
@@ -381,48 +424,97 @@ with tabs[3]:
                 st.error(f"Error en la optimización: {str(e)}")
     else:
         st.warning("Complete primero el preprocesamiento y selección de variables")
-
 # =================== resultados ===================
 with tabs[4]:
     st.header("📊 Resultados y Historial")
 
-    # Mostrar resultados de la última ejecución
     if 'resultados_evolutivos' in st.session_state and st.session_state.optimizacion_completa:
         resultados = st.session_state.resultados_evolutivos
-        
-        st.subheader("Variables seleccionadas (última ejecución):")
-        st.write(resultados['variables'])
-        
-        st.metric("Fitness obtenido (MSE)", value=f"{resultados['fitness']:.15f}")
-        st.write(f"Total de variables seleccionadas: {resultados['total_vars']}")
-        
-        # Mostrar tabla de fitness por generación
-        if 'historial_fitness' in resultados and resultados['historial_fitness']:
-            import matplotlib.pyplot as plt
-            
-            df_fitness = pd.DataFrame({
-                'Generación': list(range(1, len(resultados['historial_fitness']) + 1)),
-                'Fitness Óptimo': resultados['historial_fitness']
+
+        # Mostrar tipo de problema detectado
+        st.subheader("🔍 Tipo de problema detectado")
+        if resultados['task_type'] == "classification":
+            st.write("**Clasificación** (se usa logarithmic loss como métrica)")
+        else:
+            st.write("**Regresión** (se usa MSE como métrica)")
+
+        # Mejor modelo final
+        mejor_modelo = resultados['modelo']
+        resultados_modelos = resultados.get('resultados_modelos', {})
+
+        if mejor_modelo in resultados_modelos:
+            mejor_fitness_modelo = resultados_modelos[mejor_modelo]
+        else:
+            mejor_fitness_modelo = resultados['fitness']  
+
+        st.subheader("📌 Resumen de la última ejecución")
+        st.write("Variables seleccionadas:", resultados['variables'])
+        st.metric("Fitness obtenido", f"{mejor_fitness_modelo:.15f}")
+        st.write(f"Total de variables seleccionadas: **{resultados['total_vars']}**")
+        st.write(f"Mejor modelo final: **{mejor_modelo}**")
+
+        # Evolución del fitness
+# =================== Evolución del fitness ===================
+        historial_modelo = resultados['historial_por_modelo'].get(mejor_modelo, [])
+
+        if not historial_modelo:
+            st.warning("No hay historial disponible para el modelo seleccionado.")
+            historial_ganador = []
+        else:
+            historial_raw = historial_modelo[:n_generaciones]
+
+            # Inicializar mejor_actual según tipo de problema
+            if resultados['task_type'] == "regression":
+                mejor_actual = float("inf")
+                comparar = lambda f, best: f < best
+            else:  # classification
+                mejor_actual = float("-inf")
+                comparar = lambda f, best: f > best
+
+            historial_ganador = []
+            for f in historial_raw:
+                if f is None:
+                    continue
+                if comparar(f, mejor_actual):
+                    mejor_actual = f
+                historial_ganador.append(mejor_actual)
+
+        # Crear DataFrame solo si hay datos
+        if historial_ganador:
+            df_historial = pd.DataFrame({
+                "Generación": list(range(1, len(historial_ganador) + 1)),
+                "Fitness": historial_ganador
             })
 
-            st.subheader("Fitness Óptimo por Generación")
-            st.dataframe(df_fitness.style.format({'Fitness Óptimo': '{:.15f}'}))
-            
-            # Gráfica de convergencia
-            plt.figure(figsize=(10, 5))
-            plt.plot(df_fitness['Generación'], df_fitness['Fitness Óptimo'], marker='o', color='blue', label="Fitness óptimo")
-            mejor_fitness_final = resultados['historial_fitness'][-1]
-            plt.axhline(y=mejor_fitness_final, color='red', linestyle='--', label=f"Mejor fitness final ({mejor_fitness_final:.15f})")
-            plt.title("Evolución del Fitness a lo largo de las Generaciones")
+            st.subheader(f"📈 Evolución del fitness del modelo ({mejor_modelo})")
+            st.dataframe(df_historial.style.format({"Fitness": "{:.15f}"}))
+
+            plt.figure(figsize=(10,5))
+            plt.plot(df_historial['Generación'], df_historial['Fitness'], marker='o', color='blue')
+            plt.axhline(y=mejor_fitness_modelo, color='red', linestyle='--',
+                        label=f"Mejor fitness final ({mejor_fitness_modelo:.15f})")
             plt.xlabel("Generación")
-            plt.ylabel("Fitness (menor es mejor)")
-            plt.xticks(df_fitness['Generación'])
+            plt.ylabel("Fitness")
+            plt.title(f"Evolución del fitness - Modelo ({mejor_modelo})")
             plt.grid(True)
             plt.legend()
             st.pyplot(plt)
-    
-    # Mostrar historial de ejecuciones
+        else:
+            st.info("No hay datos de historial para mostrar la evolución del fitness.")
+
+
+
+        # Comparativa entre modelos
+        df_modelos = pd.DataFrame(
+            [(k, min(v) if v else None) for k, v in resultados['historial_por_modelo'].items()],
+            columns=["Modelo", "Mejor Fitness"]
+        ).sort_values("Mejor Fitness")
+        st.subheader("🏆 Modelo utilizado")
+        st.dataframe(df_modelos.style.format({"Mejor Fitness": "{:.15f}"}))
+
+
+    # ================== Historial de ejecuciones ==================
     if 'historial_ejecuciones' in st.session_state and st.session_state.historial_ejecuciones:
         st.subheader("📋 Historial de ejecuciones")
-        df_historial = pd.DataFrame(st.session_state.historial_ejecuciones)
-        st.dataframe(df_historial)
+        df_historial_total = pd.DataFrame(st.session_state.historial_ejecuciones)
+        st.dataframe(df_historial_total)
