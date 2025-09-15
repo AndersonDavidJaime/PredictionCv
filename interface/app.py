@@ -16,7 +16,7 @@ import streamlit as st
 # Configuración de página
 st.set_page_config(page_title="PredictionCV", layout="wide")
 st.title("📊 Predicción CV - Carga y preprocesamiento de datos")
-tabs = st.tabs(["               📁 Cargar datos              ", "⚙️ Preprocesamiento", "📉 Análisis", "🧠 Algoritmo Evolutivo", "📊 Resultados"])
+tabs = st.tabs(["            📁 Cargar datos           ", "            ⚙️ Preprocesamiento            ", "            📉 Análisis            ", "            🧠 Algoritmo Evolutivo            ", "          📊 Resultados             "])
 
 # Inicialización de variables de sesión
 default_session_state = {

@@ -10,7 +10,6 @@ from sklearn.svm import SVR, SVC
 from sklearn.neighbors import KNeighborsRegressor, KNeighborsClassifier
 from sklearn.model_selection import cross_val_score, KFold, StratifiedKFold
 import streamlit as st
-from sklearn.metrics import log_loss, make_scorer, f1_score, precision_score, recall_score, brier_score_loss
 
 
 class AlgoritmoEvolutivo:
@@ -41,38 +40,19 @@ class AlgoritmoEvolutivo:
 
         self.task_type = self._detect_task_type()
 
-        # Modelos para regresión
-        self.modelos_reg = {
-            "RandomForest": RandomForestRegressor(
-                n_estimators=50, max_depth=5, n_jobs=-1, random_state=42
-            ),
-            "GradientBoosting": GradientBoostingRegressor(random_state=42),
-            "LinearRegression": LinearRegression(),
-            "Ridge": Ridge(),
-            "SVR": SVR(),
-            "KNN": KNeighborsRegressor()
-        }
+        # Modelos iniciales (serán reinicializados en ejecutar)
+        self.modelos_reg = {}
+        self.modelos_clf = {}
+        self.modelos = {}
 
-        # Modelos para clasificación
-        self.modelos_clf = {
-            "RandomForest": RandomForestClassifier(n_estimators=50, n_jobs=-1, random_state=42),
-            "GradientBoosting": GradientBoostingClassifier(random_state=42),
-            "LogisticRegression": LogisticRegression(max_iter=1000, random_state=42),
-            "KNN": KNeighborsClassifier()
-        }
-
-        # Conjunto de modelos según tipo
-        self.modelos = self.modelos_clf if self.task_type == "classification" else self.modelos_reg
-
-        # ✅ Selección del modelo
-        if modelo_seleccionado and modelo_seleccionado in self.modelos:
-            self.modelo_activo = {modelo_seleccionado: self.modelos[modelo_seleccionado]}
+        # Modelo activo
+        self.modelo_activo = {}
+        if modelo_seleccionado:
+            self.modelo_seleccionado = modelo_seleccionado
         else:
-            nombre_default = list(self.modelos.keys())[0]
-            self.modelo_activo = {nombre_default: self.modelos[nombre_default]}
+            self.modelo_seleccionado = None
 
-        # Solo historial del modelo activo
-        self.historial_por_modelo = {name: [] for name in self.modelo_activo.keys()}
+        self.historial_por_modelo = {}
 
         # DEAP setup
         if not hasattr(creator, "FitnessMin"):
@@ -103,18 +83,11 @@ class AlgoritmoEvolutivo:
             pass
 
         series = self.data[self.target]
-
-        # Si es object o category => clasificación
         if pd.api.types.is_object_dtype(series) or pd.api.types.is_categorical_dtype(series):
             return "classification"
-
-        # Si es entero con MUY pocos valores únicos (ejemplo: binario o hasta 4 clases)
         if pd.api.types.is_integer_dtype(series) and series.nunique() <= 10:
             return "classification"
-
-        # Si es float o entero con suficientes valores => regresión
         return "regression"
-
 
     def _init_individual(self, icls):
         ind = [0] * self.n_vars
@@ -124,10 +97,8 @@ class AlgoritmoEvolutivo:
             ind[idx] = 1
         return icls(ind)
 
-
     def _evaluar_individuo(self, individuo, mejor_hasta_ahora=float("inf")):
         cols_seleccionadas = [self.independientes[i] for i, v in enumerate(individuo) if v == 1]
-
         if len(cols_seleccionadas) < self.min_vars:
             return (10.0 + self.lambda_penal * (self.min_vars - len(cols_seleccionadas)),)
 
@@ -145,21 +116,16 @@ class AlgoritmoEvolutivo:
         mejor_modelo = None
         mejor_fitness = float("inf")
 
-        #  Solo se evalúa el modelo activo
         for nombre, modelo in self.modelo_activo.items():
             try:
-                #para casos de regresion 
                 if self.task_type == "regression":
-                    cv_strategy = KFold(n_splits=min(self.cv, len(y)), shuffle=True, random_state=42)
+                    cv_strategy = KFold(n_splits=min(self.cv, len(y)), shuffle=True, random_state=np.random.randint(0, 10000))
                     MSE = cross_val_score(modelo, X, y, scoring="neg_mean_squared_error", cv=cv_strategy, n_jobs=-1)
                     fitness = -MSE.mean() + self.lambda_penal * len(cols_seleccionadas)
-                
-                #para casos de clasificacion
                 else:
-                    cv_strategy = StratifiedKFold(n_splits=min(self.cv, len(y)), shuffle=True, random_state=42)
+                    cv_strategy = StratifiedKFold(n_splits=min(self.cv, len(y)), shuffle=True, random_state=np.random.randint(0, 10000))
                     score = cross_val_score(modelo, X, y, scoring="neg_log_loss", cv=cv_strategy)
                     fitness = -score.mean() + self.lambda_penal * len(cols_seleccionadas)
-                    
             except Exception:
                 fitness = 10.0 + self.lambda_penal * len(cols_seleccionadas)
 
@@ -173,8 +139,46 @@ class AlgoritmoEvolutivo:
         individuo.mejor_modelo = mejor_modelo
         return mejor_fitness,
 
+    def _init_modelos(self):
+        """Reinicia los modelos con seeds aleatorios en cada ejecución"""
+        if self.task_type == "regression":
+            self.modelos = {
+                "RandomForest": RandomForestRegressor(
+                    n_estimators=50, max_depth=5, n_jobs=-1, random_state=np.random.randint(0, 10000)),
+                "GradientBoosting": GradientBoostingRegressor(random_state=np.random.randint(0, 10000)),
+                "LinearRegression": LinearRegression(),
+                "Ridge": Ridge(),
+                "SVR": SVR(),
+                "KNN": KNeighborsRegressor()
+            }
+        else:
+            self.modelos = {
+                "RandomForest": RandomForestClassifier(
+                    n_estimators=50, n_jobs=-1, random_state=np.random.randint(0, 10000)),
+                "GradientBoosting": GradientBoostingClassifier(random_state=np.random.randint(0, 10000)),
+                "LogisticRegression": LogisticRegression(max_iter=1000, random_state=np.random.randint(0, 10000)),
+                "KNN": KNeighborsClassifier()
+            }
 
-    def ejecutar(self):
+        if self.modelo_seleccionado and self.modelo_seleccionado in self.modelos:
+            self.modelo_activo = {self.modelo_seleccionado: self.modelos[self.modelo_seleccionado]}
+        else:
+            nombre_default = list(self.modelos.keys())[0]
+            self.modelo_activo = {nombre_default: self.modelos[nombre_default]}
+
+        self.historial_por_modelo = {name: [] for name in self.modelo_activo.keys()}
+
+    def ejecutar(self, random_seed=None):
+        # ✅ Inicializar aleatoriedad en cada ejecución
+        if random_seed is None:
+            np.random.seed(None)
+        else:
+            np.random.seed(random_seed)
+
+        # ✅ Resetear cache y modelos
+        self.eval_cache = {}
+        self._init_modelos()
+
         poblacion = self.toolbox.population(n=self.n_poblacion)
         fitnesses = list(map(lambda ind: self.toolbox.evaluate(ind), poblacion))
         for ind, fit in zip(poblacion, fitnesses):
@@ -182,7 +186,6 @@ class AlgoritmoEvolutivo:
 
         mejor_hasta_ahora = min(ind.fitness.values[0] for ind in poblacion)
 
-        # Historial inicial
         for nombre in self.modelo_activo.keys():
             vals = [ind.resultados_modelos.get(nombre, float("inf")) for ind in poblacion]
             self.historial_por_modelo[nombre].append(min(vals) if vals else float("inf"))
@@ -209,7 +212,6 @@ class AlgoritmoEvolutivo:
             for ind in offspring:
                 if not ind.fitness.valid:
                     ind.fitness.values = self.toolbox.evaluate(ind)
-
                 attempts = 0
                 while ind.fitness.values[0] >= mejor_hasta_ahora and attempts < 5:
                     self.toolbox.mutate(ind)
