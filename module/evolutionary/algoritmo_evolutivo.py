@@ -169,75 +169,102 @@ class AlgoritmoEvolutivo:
         self.historial_por_modelo = {name: [] for name in self.modelo_activo.keys()}
 
     def ejecutar(self, random_seed=None):
-        # ✅ Inicializar aleatoriedad en cada ejecución
         if random_seed is None:
             np.random.seed(None)
         else:
             np.random.seed(random_seed)
 
-        # ✅ Resetear cache y modelos
         self.eval_cache = {}
         self._init_modelos()
 
         poblacion = self.toolbox.population(n=self.n_poblacion)
-        fitnesses = list(map(lambda ind: self.toolbox.evaluate(ind), poblacion))
-        for ind, fit in zip(poblacion, fitnesses):
-            ind.fitness.values = fit
+        for ind in poblacion:
+            ind.fitness.values = self.toolbox.evaluate(ind)
 
-        mejor_hasta_ahora = min(ind.fitness.values[0] for ind in poblacion)
+        #  Guardar mejor individuo global
+        mejor_global = min(poblacion, key=lambda ind: ind.fitness.values[0])
+        mejor_fitness_global = mejor_global.fitness.values[0]
 
+        sin_mejora = 0  # Contador de generaciones sin mejora
+
+        # Inicializar historial
         for nombre in self.modelo_activo.keys():
             vals = [ind.resultados_modelos.get(nombre, float("inf")) for ind in poblacion]
             self.historial_por_modelo[nombre].append(min(vals) if vals else float("inf"))
 
         for gen in range(self.n_generaciones):
-            mejor_idx = np.argmin([ind.fitness.values[0] for ind in poblacion])
-            mejor_ind = self.toolbox.clone(poblacion[mejor_idx])
-
-            offspring = self.toolbox.select(poblacion, len(poblacion) - 1)
+            #  Selección por torneo
+            offspring = self.toolbox.select(poblacion, len(poblacion))
             offspring = list(map(self.toolbox.clone, offspring))
-            offspring.append(mejor_ind)
 
-            for c1, c2 in zip(offspring[::2], offspring[1::2]):
+            #  Elitismo: conservar el mejor individuo global
+            offspring[0] = self.toolbox.clone(mejor_global)
+
+            #  Cruce
+            for c1, c2 in zip(offspring[1::2], offspring[2::2]):
                 if np.random.rand() < self.prob_cruce:
                     self.toolbox.mate(c1, c2)
                     del c1.fitness.values
                     del c2.fitness.values
 
-            for m in offspring:
-                if np.random.rand() < self.prob_mut:
-                    self.toolbox.mutate(m)
-                    del m.fitness.values
+            # Mutación adaptativa
+            mut_prob = self.prob_mut
+            if sin_mejora >= 5:  # aumenta mutación si no mejora en 5 generaciones
+                mut_prob = min(0.5, self.prob_mut * 2)
 
+            for ind in offspring[1:]:
+                if np.random.rand() < mut_prob:
+                    self.toolbox.mutate(ind)
+                    del ind.fitness.values
+
+            #  Evaluación y reintento si no mejora
             for ind in offspring:
                 if not ind.fitness.valid:
                     ind.fitness.values = self.toolbox.evaluate(ind)
+
+                # Intentos extra para escapar de estancamiento
                 attempts = 0
-                while ind.fitness.values[0] >= mejor_hasta_ahora and attempts < 5:
+                while ind.fitness.values[0] >= mejor_fitness_global and attempts < 5:
                     self.toolbox.mutate(ind)
                     ind.fitness.values = self.toolbox.evaluate(ind)
                     attempts += 1
 
-            poblacion = offspring
-            mejor_hasta_ahora = min(ind.fitness.values[0] for ind in poblacion)
+            #  Reintroducción de diversidad si no mejora en 10 generaciones
+            if sin_mejora >= 10:
+                n_reemplazos = max(1, self.n_poblacion // 4)
+                nuevos = self.toolbox.population(n=n_reemplazos)
+                for ind in nuevos:
+                    ind.fitness.values = self.toolbox.evaluate(ind)
+                offspring[-n_reemplazos:] = nuevos
+                self.eval_cache.clear()  # limpiar cache para explorar nuevas soluciones
 
+            # Actualizar población
+            poblacion = offspring
+
+            # Actualizar mejor global
+            mejor_actual = min(poblacion, key=lambda ind: ind.fitness.values[0])
+            if mejor_actual.fitness.values[0] < mejor_fitness_global:
+                mejor_global = self.toolbox.clone(mejor_actual)
+                mejor_fitness_global = mejor_global.fitness.values[0]
+                sin_mejora = 0
+            else:
+                sin_mejora += 1
+
+            # Actualizar historial
             for nombre in self.modelo_activo.keys():
                 vals = [ind.resultados_modelos.get(nombre, float("inf")) for ind in poblacion]
                 self.historial_por_modelo[nombre].append(min(vals) if vals else float("inf"))
 
-        mejor_idx = np.argmin([ind.fitness.values[0] for ind in poblacion])
-        mejor_individuo = poblacion[mejor_idx]
-
+        #  Extraer resultados finales
         vars_seleccionadas = [
-            self.independientes[i] for i, val in enumerate(mejor_individuo) if val == 1
+            self.independientes[i] for i, val in enumerate(mejor_global) if val == 1
         ]
-        mejor_fitness = mejor_individuo.fitness.values[0]
 
         return {
             "variables": vars_seleccionadas,
-            "fitness": mejor_fitness,
-            "modelo": mejor_individuo.mejor_modelo,
-            "resultados_modelos": mejor_individuo.resultados_modelos,
+            "fitness": mejor_fitness_global,
+            "modelo": mejor_global.mejor_modelo,
+            "resultados_modelos": mejor_global.resultados_modelos,
             "total_vars": len(vars_seleccionadas),
             "historial_por_modelo": self.historial_por_modelo,
             "task_type": self.task_type

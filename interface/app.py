@@ -11,6 +11,8 @@ from module.preprocessing.preprocessing import Preprocessing
 from module.feature_selection.fase_seleccion import FaseSeleccionRobusta
 from module.evolutionary.algoritmo_evolutivo import AlgoritmoEvolutivo
 import streamlit as st
+import numpy as np
+
 
 
 # Configuración de página
@@ -438,49 +440,56 @@ with tabs[4]:
         else:
             st.write("**Regresión** (se usa MSE como métrica)")
 
-        # Mejor modelo final
+        # Mejor modelo final (valores desde resultados, pero priorizamos el historial cuando sea posible)
         mejor_modelo = resultados['modelo']
         resultados_modelos = resultados.get('resultados_modelos', {})
 
-        if mejor_modelo in resultados_modelos:
-            mejor_fitness_modelo = resultados_modelos[mejor_modelo]
+        # Intentar obtener el mejor fitness real desde el historial del modelo (si existe)
+        historial_modelo_raw = resultados.get('historial_por_modelo', {}).get(mejor_modelo, [])
+        # filtrar valores válidos
+        valid_hist_vals = [v for v in historial_modelo_raw if v is not None and np.isfinite(v)]
+        if valid_hist_vals:
+            mejor_fitness_modelo = float(np.min(valid_hist_vals))
         else:
-            mejor_fitness_modelo = resultados['fitness']  
+            # fallback a lo que devuelva el algoritmo para el individuo ganador
+            if mejor_modelo in resultados_modelos and resultados_modelos[mejor_modelo] is not None:
+                mejor_fitness_modelo = resultados_modelos[mejor_modelo]
+            else:
+                mejor_fitness_modelo = resultados.get('fitness', float("nan"))
 
         st.subheader("📌 Resumen de la última ejecución")
         st.write("Variables seleccionadas:", resultados['variables'])
+        # Mostrar el fitness (si es NaN, Streamlit mostrará 'nan' pero es improbable)
         st.metric("Fitness obtenido", f"{mejor_fitness_modelo:.15f}")
         st.write(f"Total de variables seleccionadas: **{resultados['total_vars']}**")
         st.write(f"Mejor modelo final: **{mejor_modelo}**")
 
         # Evolución del fitness
-# =================== Evolución del fitness ===================
-        historial_modelo = resultados['historial_por_modelo'].get(mejor_modelo, [])
+        historial_modelo = historial_modelo_raw  # ya obtenido arriba
 
         if not historial_modelo:
             st.warning("No hay historial disponible para el modelo seleccionado.")
             historial_ganador = []
         else:
+            # recortar al número de generaciones mostrado (si existe n_generaciones en scope)
             historial_raw = historial_modelo[:n_generaciones]
 
-            # Inicializar mejor_actual según tipo de problema
-            if resultados['task_type'] == "regression":
-                mejor_actual = float("inf")
-                comparar = lambda f, best: f < best
-            else:  # classification
-                mejor_actual = float("-inf")
-                comparar = lambda f, best: f > best
-
+            # Construir mínimo acumulado (cumulative minimum). Siempre minimizamos: menor = mejor.
             historial_ganador = []
+            mejor_actual = float("inf")
             for f in historial_raw:
-                if f is None:
+                # si valor inválido, dejamos el mejor_actual (si aún inf -> mantendremos Inf/nan)
+                if f is None or (isinstance(f, float) and not np.isfinite(f)):
+                    # si aún no tenemos un mejor_actual válido, añadimos NaN para que la gráfica ignore
+                    historial_ganador.append(mejor_actual if np.isfinite(mejor_actual) else np.nan)
                     continue
-                if comparar(f, mejor_actual):
+                # actualizar mínimo acumulado
+                if f < mejor_actual:
                     mejor_actual = f
                 historial_ganador.append(mejor_actual)
 
-        # Crear DataFrame solo si hay datos
-        if historial_ganador:
+        # Crear DataFrame solo si hay datos efectivos
+        if historial_ganador and any([not (isinstance(v, float) and np.isnan(v)) for v in historial_ganador]):
             df_historial = pd.DataFrame({
                 "Generación": list(range(1, len(historial_ganador) + 1)),
                 "Fitness": historial_ganador
@@ -489,26 +498,39 @@ with tabs[4]:
             st.subheader(f"📈 Evolución del fitness del modelo ({mejor_modelo})")
             st.dataframe(df_historial.style.format({"Fitness": "{:.15f}"}))
 
+            # Para la línea roja usamos el mínimo real del historial mostrado (si existe)
+            valid_plot_vals = [v for v in df_historial['Fitness'].tolist() if np.isfinite(v)]
+            if valid_plot_vals:
+                mejor_fitness_plotted = float(np.min(valid_plot_vals))
+            else:
+                mejor_fitness_plotted = mejor_fitness_modelo  # fallback
+
             plt.figure(figsize=(10,5))
-            plt.plot(df_historial['Generación'], df_historial['Fitness'], marker='o', color='blue')
-            plt.axhline(y=mejor_fitness_modelo, color='red', linestyle='--',
-                        label=f"Mejor fitness final ({mejor_fitness_modelo:.15f})")
+            plt.plot(df_historial['Generación'], df_historial['Fitness'], marker='o', color='blue', label="mínimo acumulado por generación")
+            # dibujar la línea roja en el mínimo real encontrado
+            if np.isfinite(mejor_fitness_plotted):
+                plt.axhline(y=mejor_fitness_plotted, color='red', linestyle='--',
+                            label=f"Mejor fitness final ({mejor_fitness_plotted:.15f})")
             plt.xlabel("Generación")
-            plt.ylabel("Fitness")
+            plt.ylabel("Fitness (menor es mejor)")
             plt.title(f"Evolución del fitness - Modelo ({mejor_modelo})")
             plt.grid(True)
             plt.legend()
             st.pyplot(plt)
         else:
-            st.info("No hay datos de historial para mostrar la evolución del fitness.")
+            st.info("No hay datos de historial válidos para mostrar la evolución del fitness.")
 
+        # Comparativa entre modelos: calcular el mejor fitness válido por modelo (seguro contra None/inf)
+        rows = []
+        for k, v in resultados.get('historial_por_modelo', {}).items():
+            vals = [x for x in v if x is not None and np.isfinite(x)]
+            best_val = float(np.min(vals)) if vals else None
+            rows.append((k, best_val))
 
+        df_modelos = pd.DataFrame(rows, columns=["Modelo", "Mejor Fitness"])
+        if df_modelos["Mejor Fitness"].notna().any():
+            df_modelos = df_modelos.sort_values("Mejor Fitness", na_position="last")
 
-        # Comparativa entre modelos
-        df_modelos = pd.DataFrame(
-            [(k, min(v) if v else None) for k, v in resultados['historial_por_modelo'].items()],
-            columns=["Modelo", "Mejor Fitness"]
-        ).sort_values("Mejor Fitness")
         st.subheader("🏆 Modelo utilizado")
         st.dataframe(df_modelos.style.format({"Mejor Fitness": "{:.15f}"}))
 
